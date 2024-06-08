@@ -1,11 +1,8 @@
-# PiCockpit.com
-
 import bluetooth
 import random
 import struct
 import time
 from machine import Pin
-
 
 from micropython import const
 
@@ -32,6 +29,29 @@ _UART_SERVICE = (
     (_UART_TX, _UART_RX),
 )
 
+# For the characteristic
+
+_PICOFRAME_CHARACTERISTIC_UUID = bluetooth.UUID('00001002-0000-1000-8000-00805F9B34FB')
+_PICOFRAME_DESCRIPTOR_UUID = bluetooth.UUID('00001003-0000-1000-8000-00805F9B34FB')
+
+_PICOFRAME_DESCRIPTOR = (
+    _PICOFRAME_CHARACTERISTIC_UUID,
+    _FLAG_READ | _FLAG_WRITE | _FLAG_NOTIFY,
+
+)
+
+# Custom name
+_PICOFRAME_CHARACTERISTIC = (
+    _PICOFRAME_CHARACTERISTIC_UUID,
+    _FLAG_READ | _FLAG_WRITE | _FLAG_NOTIFY,
+    (_PICOFRAME_DESCRIPTOR,)
+)
+
+# For the service
+_PICOFRAME_SERVICE_UUID = bluetooth.UUID('00001001-0000-1000-8000-00805F9B34FB')
+
+_PICOFRAME_SERVICE = (_PICOFRAME_SERVICE_UUID, (_PICOFRAME_CHARACTERISTIC,))
+
 _ADV_TYPE_FLAGS = const(0x01)
 _ADV_TYPE_NAME = const(0x09)
 _ADV_TYPE_UUID16_COMPLETE = const(0x3)
@@ -41,6 +61,7 @@ _ADV_TYPE_UUID16_MORE = const(0x2)
 _ADV_TYPE_UUID32_MORE = const(0x4)
 _ADV_TYPE_UUID128_MORE = const(0x6)
 _ADV_TYPE_APPEARANCE = const(0x19)
+
 
 def advertising_payload(limited_disc=False, br_edr=False, name=None, services=None, appearance=0):
     payload = bytearray()
@@ -70,17 +91,20 @@ def advertising_payload(limited_disc=False, br_edr=False, name=None, services=No
 
     if appearance:
         _append(_ADV_TYPE_APPEARANCE, struct.pack("<h", appearance))
-
+    print(name)
     return payload
 
 
-
 class BluetothDevice:
-    def __init__(self, ble, name="PicoFram"):
+    def __init__(self, ble, name="Pico"):
         self._ble = ble
         self._ble.active(True)
         self._ble.irq(self._irq)
-        ((self._handle_tx, self._handle_rx),) = self._ble.gatts_register_services((_UART_SERVICE,))
+
+        ((self._handle_tx, self._handle_rx),
+         (self._picoframe_characteristic, self._picoframe_descriptor,)) = self._ble.gatts_register_services(
+            (_UART_SERVICE, _PICOFRAME_SERVICE), )
+
         self._connections = set()
         self._write_callback = None
         self._payload = advertising_payload(name=name, services=[_UART_UUID])
@@ -126,8 +150,7 @@ def demo():
         print("RX", v)
 
     bluetooth_device.on_write(on_rx)
-    
-    
+
     i = 0
     while True:
         if bluetooth_device.is_connected():
@@ -142,3 +165,9 @@ def demo():
 
 if __name__ == "__main__":
     demo()
+
+
+
+
+
+
