@@ -1,173 +1,210 @@
-import bluetooth
-import random
-import struct
-import time
-from machine import Pin
+# MIT license; Copyright (c) 2021 Jim Mussared
+
+# This is a BLE file server, based very loosely on the Object Transfer Service
+# specification. It demonstrated transfering data over an L2CAP channel, as
+# well as using notifications and GATT writes on a characteristic.
+
+# The server supports downloading and uploading files, as well as querying
+# directory listings and file sizes.
+
+# In order to access the file server, a client must connect, then establish an
+# L2CAP channel. To being an operation, a command is written to the control
+# characteristic, including a command number, sequence number, and filesystem
+# path. The response will be either via a notification on the control
+# characteristic (e.g. file size), or via the L2CAP channel (file contents or
+# directory listing).
+
+import sys
+
+# ruff: noqa: E402
+sys.path.append("")
 
 from micropython import const
 
-_IRQ_CENTRAL_CONNECT = const(1)
-_IRQ_CENTRAL_DISCONNECT = const(2)
-_IRQ_GATTS_WRITE = const(3)
+import asyncio
+import aioble
+import bluetooth
 
-_FLAG_READ = const(0x0002)
-_FLAG_WRITE_NO_RESPONSE = const(0x0004)
-_FLAG_WRITE = const(0x0008)
-_FLAG_NOTIFY = const(0x0010)
+import struct
+import os
 
-_UART_UUID = bluetooth.UUID("6E400001-B5A3-F393-E0A9-E50E24DCCA9E")
-_UART_TX = (
-    bluetooth.UUID("6E400003-B5A3-F393-E0A9-E50E24DCCA9E"),
-    _FLAG_READ | _FLAG_NOTIFY,
+# Randomly generated UUIDs.
+_FILE_SERVICE_UUID = bluetooth.UUID("0492fcec-7194-11eb-9439-0242ac130002")
+_CONTROL_CHARACTERISTIC_UUID = bluetooth.UUID("0492fcec-7194-11eb-9439-0242ac130003")
+
+# How frequently to send advertising beacons.
+_ADV_INTERVAL_MS = 250_000
+
+
+_COMMAND_SEND = const(0)
+_COMMAND_RECV = const(1)  # Not yet implemented.
+_COMMAND_LIST = const(2)
+_COMMAND_SIZE = const(3)
+_COMMAND_DONE = const(4)
+
+_STATUS_OK = const(0)
+_STATUS_NOT_IMPLEMENTED = const(1)
+_STATUS_NOT_FOUND = const(2)
+
+_L2CAP_PSN = const(22)
+_L2CAP_MTU = const(128)
+
+
+# Register GATT server.
+file_service = aioble.Service(_FILE_SERVICE_UUID)
+control_characteristic = aioble.Characteristic(
+    file_service, _CONTROL_CHARACTERISTIC_UUID, write=True, notify=True
 )
-_UART_RX = (
-    bluetooth.UUID("6E400002-B5A3-F393-E0A9-E50E24DCCA9E"),
-    _FLAG_WRITE | _FLAG_WRITE_NO_RESPONSE,
-)
-_UART_SERVICE = (
-    _UART_UUID,
-    (_UART_TX, _UART_RX),
-)
-
-# For the characteristic
-
-_PICOFRAME_CHARACTERISTIC_UUID = bluetooth.UUID('00001002-0000-1000-8000-00805F9B34FB')
-_PICOFRAME_DESCRIPTOR_UUID = bluetooth.UUID('00001003-0000-1000-8000-00805F9B34FB')
-
-_PICOFRAME_DESCRIPTOR = (
-    _PICOFRAME_CHARACTERISTIC_UUID,
-    _FLAG_READ | _FLAG_WRITE | _FLAG_NOTIFY,
-
-)
-
-# Custom name
-_PICOFRAME_CHARACTERISTIC = (
-    _PICOFRAME_CHARACTERISTIC_UUID,
-    _FLAG_READ | _FLAG_WRITE | _FLAG_NOTIFY,
-    (_PICOFRAME_DESCRIPTOR,)
-)
-
-# For the service
-_PICOFRAME_SERVICE_UUID = bluetooth.UUID('00001001-0000-1000-8000-00805F9B34FB')
-
-_PICOFRAME_SERVICE = (_PICOFRAME_SERVICE_UUID, (_PICOFRAME_CHARACTERISTIC,))
-
-_ADV_TYPE_FLAGS = const(0x01)
-_ADV_TYPE_NAME = const(0x09)
-_ADV_TYPE_UUID16_COMPLETE = const(0x3)
-_ADV_TYPE_UUID32_COMPLETE = const(0x5)
-_ADV_TYPE_UUID128_COMPLETE = const(0x7)
-_ADV_TYPE_UUID16_MORE = const(0x2)
-_ADV_TYPE_UUID32_MORE = const(0x4)
-_ADV_TYPE_UUID128_MORE = const(0x6)
-_ADV_TYPE_APPEARANCE = const(0x19)
+aioble.register_services(file_service)
 
 
-def advertising_payload(limited_disc=False, br_edr=False, name=None, services=None, appearance=0):
-    payload = bytearray()
-
-    def _append(adv_type, value):
-        nonlocal payload
-        payload += struct.pack("BB", len(value) + 1, adv_type) + value
-
-    _append(
-        _ADV_TYPE_FLAGS,
-        struct.pack("B", (0x01 if limited_disc else 0x02) + (0x18 if br_edr else 0x04)),
-    )
-
-    if name:
-        name_bytes = bytes(name, "utf-8")
-        _append(_ADV_TYPE_NAME, name_bytes)
-
-    if services:
-        for uuid in services:
-            b = bytes(uuid)
-            if len(b) == 2:
-                _append(_ADV_TYPE_UUID16_COMPLETE, b)
-            elif len(b) == 4:
-                _append(_ADV_TYPE_UUID32_COMPLETE, b)
-            elif len(b) == 16:
-                _append(_ADV_TYPE_UUID128_COMPLETE, b)
-
-    if appearance:
-        _append(_ADV_TYPE_APPEARANCE, struct.pack("<h", appearance))
-    print(name)
-    return payload
+send_file = None
+recv_file = None
+list_path = None
+op_seq = None
+l2cap_event = asyncio.Event()
 
 
-class BluetothDevice:
-    def __init__(self, ble, name="Pico"):
-        self._ble = ble
-        self._ble.active(True)
-        self._ble.irq(self._irq)
-
-        ((self._handle_tx, self._handle_rx),
-         (self._picoframe_characteristic, self._picoframe_descriptor,)) = self._ble.gatts_register_services(
-            (_UART_SERVICE, _PICOFRAME_SERVICE), )
-
-        self._connections = set()
-        self._write_callback = None
-        self._payload = advertising_payload(name=name, services=[_UART_UUID])
-        self._advertise()
-
-    def _irq(self, event, data):
-        if event == _IRQ_CENTRAL_CONNECT:
-            conn_handle, _, _ = data
-            print("New connection", conn_handle)
-            self._connections.add(conn_handle)
-        elif event == _IRQ_CENTRAL_DISCONNECT:
-            conn_handle, _, _ = data
-            print("Disconnected", conn_handle)
-            self._connections.remove(conn_handle)
-            self._advertise()
-        elif event == _IRQ_GATTS_WRITE:
-            conn_handle, value_handle = data
-            value = self._ble.gatts_read(value_handle)
-            if value_handle == self._handle_rx and self._write_callback:
-                self._write_callback(value)
-
-    def send(self, data):
-        for conn_handle in self._connections:
-            self._ble.gatts_notify(conn_handle, self._handle_tx, data)
-
-    def is_connected(self):
-        return len(self._connections) > 0
-
-    def _advertise(self, interval_us=500000):
-        print("Starting advertising")
-        self._ble.gap_advertise(interval_us, adv_data=self._payload)
-
-    def on_write(self, callback):
-        self._write_callback = callback
+def send_done_notification(connection, status=_STATUS_OK):
+    global op_seq
+    control_characteristic.notify(connection, struct.pack("<BBB", _COMMAND_DONE, op_seq, status))
+    op_seq = None
 
 
-def demo():
-    led_onboard = Pin("LED", Pin.OUT)
-    ble = bluetooth.BLE()
-    bluetooth_device = BluetothDevice(ble)
+async def l2cap_task(connection):
+    # Global variables used in this function
+    global send_file, recv_file, list_path
+    try:
+        # Accept an L2CAP connection with the specified PSM and MTU
+        channel = await connection.l2cap_accept(_L2CAP_PSN, _L2CAP_MTU)
+        print("channel accepted")  # Debug: Channel accepted
 
-    def on_rx(v):
-        print("RX", v)
+        while True:
+            # Wait for the l2cap_event to be set
+            await l2cap_event.wait()
+            # Clear the l2cap_event
+            l2cap_event.clear()
 
-    bluetooth_device.on_write(on_rx)
+            # If there's a file to send
+            if send_file:
+                print("Sending:", send_file)  # Debug: Sending file
+                # Open the file in binary read mode
+                with open(send_file, "rb") as f:  # noqa: ASYNC101
+                    # Create a buffer of size peer_mtu
+                    buf = bytearray(channel.peer_mtu)
+                    # Create a memoryview of the buffer
+                    mv = memoryview(buf)
+                    # Read into the buffer and send the data over the channel
+                    while n := f.readinto(buf):
+                        await channel.send(mv[:n])
+                # Flush the channel to ensure all data is sent
+                await channel.flush()
+                # Send a done notification
+                send_done_notification(connection)
+                # Reset the send_file variable
+                send_file = None
+            # If there's a file to receive
+            if recv_file:
+                print("Receiving:", recv_file)  # Debug: Receiving file
+                # Send a done notification with status NOT_IMPLEMENTED
+                send_done_notification(connection, _STATUS_NOT_IMPLEMENTED)
+                # Reset the recv_file variable
+                recv_file = None
+            # If there's a path to list
+            if list_path:
+                print("List:", list_path)  # Debug: Listing path
+                try:
+                    # List the directory and send the details over the channel
+                    for name, _, _, size in os.ilistdir(list_path):
+                        await channel.send("{}:{}\n".format(size, name))
+                    # Send a newline character to indicate end of listing
+                    await channel.send("\n")
+                    # Flush the channel to ensure all data is sent
+                    await channel.flush()
+                    # Send a done notification
+                    send_done_notification(connection)
+                except OSError:
+                    # If an error occurred while listing, send a done notification with status NOT_FOUND
+                    send_done_notification(connection, _STATUS_NOT_FOUND)
+                # Reset the list_path variable
+                list_path = None
 
-    i = 0
+    except aioble.DeviceDisconnectedError:
+        print("Stopping l2cap")  # Debug: Stopping L2CAP
+        return
+
+
+async def control_task(connection):
+    global send_file, recv_file, list_path
+
+    try:
+        with connection.timeout(None):
+            while True:
+                print("Waiting for write")  # Debug: Waiting for a write operation
+                await control_characteristic.written()
+                msg = control_characteristic.read()
+                control_characteristic.write(b"")
+
+                if len(msg) < 3:
+                    continue
+
+                # Message is <command><seq><path...>.
+                command = msg[0]
+                seq = msg[1]
+                file = msg[2:].decode()
+
+                if command == _COMMAND_SEND:
+                    print(f"Command SEND received for file: {file}")  # Debug: Command SEND received
+                    send_file = file
+                    l2cap_event.set()
+                elif command == _COMMAND_RECV:
+                    print(f"Command RECV received for file: {file}")  # Debug: Command RECV received
+                    recv_file = file
+                    l2cap_event.set()
+                elif command == _COMMAND_LIST:
+                    print(f"Command LIST received for path: {file}")  # Debug: Command LIST received
+                    list_path = file
+                    l2cap_event.set()
+                elif command == _COMMAND_SIZE:
+                    print(f"Command SIZE received for file: {file}")  # Debug: Command SIZE received
+                    try:
+                        stat = os.stat(file)
+                        size = stat[6]
+                        status = 0
+                    except OSError:
+                        size = 0
+                        status = _STATUS_NOT_FOUND
+                    control_characteristic.notify(
+                        connection, struct.pack("<BBI", seq, status, size)
+                    )
+    except aioble.DeviceDisconnectedError:
+        print("Device disconnected")  # Debug: Device disconnected
+        return
+
+
+# Serially wait for connections. Don't advertise while a central is
+# connected.
+async def peripheral_task():
     while True:
-        if bluetooth_device.is_connected():
-            led_onboard.on()
-            for _ in range(3):
-                data = str(i) + "_"
-                print("TX", data)
-                bluetooth_device.send(data)
-                i += 1
-        time.sleep_ms(100)
+        print("Waiting for connection")
+        connection = await aioble.advertise(
+            _ADV_INTERVAL_MS,
+            name="PicoFram",
+            services=[_FILE_SERVICE_UUID],
+        )
+        print("Connection from", connection.device)
+
+        t = asyncio.create_task(l2cap_task(connection))
+        await control_task(connection)
+        t.cancel()
+
+        await connection.disconnected()
 
 
-if __name__ == "__main__":
-    demo()
+# Run both tasks.
+async def main():
+    await peripheral_task()
 
 
-
-
-
+asyncio.run(main())
 
