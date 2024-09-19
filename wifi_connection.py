@@ -2,12 +2,15 @@ import network
 import socket
 import time
 import struct
+import gc
 
-SSID = ''
-PASSWORD = ''
+from rgbmatrix import RGBMatrix, RGBMatrixOptions
 
 
-def connect_to_wifi(ssid, password, max_attempts=10):
+
+def connect_to_wifi(max_attempts=10):
+    ssid = 'NDI_86'
+    password = '09484108'
     wlan = network.WLAN(network.STA_IF)
     wlan.active(True)
     wlan.connect(ssid, password)
@@ -51,35 +54,56 @@ def decode_data(sock):
     time_data = recv_exact(sock, 4)
     time = struct.unpack('!f', time_data)[0]
 
-    pixels = []
-    chunk_size = 1024
+    pixels = bytearray()
+    chunk_size = 256
+    print(f"Free memory: {gc.mem_free()} bytes")
+    counter = 0
     while True:
         try:
-            pixel_chunk = []
             for _ in range(chunk_size):
                 pixel_data = recv_exact(sock, 4)
-                pixel = struct.unpack('!i', pixel_data)[0]
-                pixel_chunk.append(pixel)
-            pixels.extend(pixel_chunk)
+                if not pixel_data:
+                    raise ValueError("Incomplete pixel data")
+                pixels.extend(pixel_data)
+                counter += 1
+                print(pixel_data)
+            gc.collect()  # Trigger garbage collection more frequently
+
         except ValueError:
             break
 
+    print(counter)
+    print(f"Free memory: {gc.mem_free()} bytes")
+
+    # Free memory by deleting large objects
+    del chosen_slot_data, time_data, pixel_data
+    gc.collect()  # Trigger garbage collection after deleting objects
+
     return chosen_slot, time, pixels
+
+def print_memory_info():
+    gc.collect()
+    print(f"Free memory: {gc.mem_free()} bytes")
+    print(f"Allocated memory: {gc.mem_alloc()} bytes")
+    print(f"Total memory: {gc.mem_free() + gc.mem_alloc()} bytes")
 
 
 def main():
-    ip_address = connect_to_wifi(SSID, PASSWORD)
+    print_memory_info()
+    ip_address = connect_to_wifi()
+    print_memory_info()
     if not ip_address:
         return
-
+    print_memory_info()
     server_socket = setup_server(ip_address)
     client_socket, client_address = server_socket.accept()
     print('Connection from:', client_address)
-
+    print_memory_info()
     chosen_slot, time, pixels = decode_data(client_socket)
+    print_memory_info()
     print(f"Chosen Slot: {chosen_slot}, Time: {time}, Pixels: {pixels}")
     print(f"len(pixels): {len(pixels)}")
-
+    
     client_socket.close()
     server_socket.close()
 
