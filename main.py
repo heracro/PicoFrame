@@ -13,6 +13,7 @@ HEIGHT = 64
 WIDTH = 64
 slots = {}
 
+
 @app.route("/system", methods=["POST"])
 def system_action():
     """
@@ -40,7 +41,6 @@ def system_action():
                 return jsonify({"status": "success", "message": "RaspiFrame updated and restarted successfully"}), 200
             except Exception as e:
                 return jsonify({"status": "error", "message": f"Failed to update RaspiFrame: {str(e)}"}), 500
-
         elif action == "update_raspbian":
             try:
                 os.system("sudo apt-get update && sudo apt-get upgrade -y")
@@ -53,15 +53,12 @@ def system_action():
                 return jsonify({"status": "success", "message": "Rebooting Raspberry Pi..."}), 200
             except Exception as e:
                 return jsonify({"status": "error", "message": f"Failed to reboot: {str(e)}"}), 500
-
-
         elif action == "shutdown":
             try:
                 os.system("sudo shutdown now")
                 return jsonify({"status": "success", "message": "Shutting down Raspberry Pi..."}), 200
             except Exception as e:
                 return jsonify({"status": "error", "message": f"Failed to shut down: {str(e)}"}), 500
-
         else:
             return jsonify({"error": "Invalid action"}), 400
 
@@ -151,7 +148,6 @@ def ping():
     return jsonify({"status": "success", "message": "Received ping"}), 200
 
 
-
 def start_udp_listener():
     """
     Listens for UDP broadcast messages and responds with device info.
@@ -180,6 +176,7 @@ def get_ip_address():
     except Exception as e:
         print(f"Error getting IP address: {e}")
         return "127.0.0.1"
+
 
 if __name__ == "__main__":
     listener_thread = threading.Thread(target=start_udp_listener, daemon=True)
