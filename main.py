@@ -1,10 +1,15 @@
-from flask import Flask
+from flask import Flask, request, jsonify
 import socket
 import threading
 import os
 
 
 app = Flask(__name__)
+
+@app.route("/ping", methods=["GET", "POST"])
+def ping():
+    return jsonify({"status": "success", "message": "Received ping"}), 200
+
 
 
 def start_udp_listener():
