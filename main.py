@@ -7,8 +7,67 @@ import struct
 import gc
 import psutil
 
-
 app = Flask(__name__)
+
+HEIGHT = 64
+WIDTH = 64
+slots = {}
+
+@app.route("/system", methods=["POST"])
+def system_action():
+    """
+    Handle system-level actions like updating, rebooting, and shutting down.
+    """
+    try:
+        data = request.get_json()
+        print(f"data: {data}")
+        action = data.get("action", "").lower()
+
+        if action == "getfreemem":
+
+            memory = psutil.virtual_memory()
+            response = {
+                "total": memory.total,
+                "available": memory.available,
+                "used": memory.used,
+                "percentage": memory.percent
+            }
+            return jsonify(response), 200
+
+        elif action == "update_raspiframe":
+            try:
+                os.system("sudo systemctl restart raspiframe.service")
+                return jsonify({"status": "success", "message": "RaspiFrame updated and restarted successfully"}), 200
+            except Exception as e:
+                return jsonify({"status": "error", "message": f"Failed to update RaspiFrame: {str(e)}"}), 500
+
+        elif action == "update_raspbian":
+            try:
+                os.system("sudo apt-get update && sudo apt-get upgrade -y")
+                return jsonify({"status": "success", "message": "Raspbian updated successfully"}), 200
+            except Exception as e:
+                return jsonify({"status": "error", "message": f"Failed to update Raspbian: {str(e)}"}), 500
+        elif action == "reboot":
+            try:
+                os.system("sudo reboot")
+                return jsonify({"status": "success", "message": "Rebooting Raspberry Pi..."}), 200
+            except Exception as e:
+                return jsonify({"status": "error", "message": f"Failed to reboot: {str(e)}"}), 500
+
+
+        elif action == "shutdown":
+            try:
+                os.system("sudo shutdown now")
+                return jsonify({"status": "success", "message": "Shutting down Raspberry Pi..."}), 200
+            except Exception as e:
+                return jsonify({"status": "error", "message": f"Failed to shut down: {str(e)}"}), 500
+
+        else:
+            return jsonify({"error": "Invalid action"}), 400
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
 
 @app.route("/image", methods=["POST"])
 def upload_image():
