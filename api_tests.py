@@ -19,9 +19,10 @@ class RaspberryPiClient:
         :return: Response JSON or error message
         """
         url = f"{self.base_url}{endpoint}"
+        print(f"Sending {method} request to {url}")
         try:
             if method == "GET":
-                response = requests.get(url)
+                response = requests.get(url, params=data)
             elif method == "POST":
                 response = requests.post(url, json=data)
             else:
@@ -73,17 +74,29 @@ class RaspberryPiClient:
         """
         return self.send_request("/system", method="POST", data={"action": "shutdown"})
 
+    def get_busy_slots(self):
+        """
+        Fetch the list of busy slots from the Raspberry Pi.
+        :return: List of busy slots or an error message
+        """
+        return self.send_request("/slots", method="GET")
+
+    def get_image(self, slot):
+        """
+        Retrieve image data from a specific slot on the Raspberry Pi.
+        :param slot: Slot number to fetch the image data from.
+        :return: Image data JSON or an error message
+        """
+        return self.send_request("/image", method="GET", data={"slot": slot})
+
 
 if __name__ == "__main__":
-    # Replace with the actual IP and port of your Raspberry Pi
-    raspberry_pi_ip = "192.168.100.156"  # Replace with the Pi's IP
-    raspberry_pi_port = 14440           # Replace with the Flask server's port
-
-    # Initialize the client
+    raspberry_pi_ip = "192.168.100.156"
+    raspberry_pi_port = 14440
+    slot = '2'
     client = RaspberryPiClient(raspberry_pi_ip, raspberry_pi_port)
-    # Example: Check memory status
-    print("Checking memory status...")
-    print(client.check_memory())
+    # print("Checking memory status...")
+    # print(client.check_memory())
     # print("Updating RaspiFrame...")
     # print(client.update_raspiframe())
     # print(client.update_raspbian())
@@ -91,3 +104,7 @@ if __name__ == "__main__":
     # print(client.reboot())
     # print("Shutting down RaspiFrame...")
     # print(client.shutdown_raspiframe())
+    # print("Fetching busy slots...")
+    # print(client.get_busy_slots())
+    print(f"Fetching image from slot {slot}...")
+    print(client.get_image(slot))
