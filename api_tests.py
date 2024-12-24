@@ -1,5 +1,5 @@
 import requests
-
+import json
 
 class RaspberryPiClient:
     def __init__(self, ip, port):
@@ -89,11 +89,39 @@ class RaspberryPiClient:
         """
         return self.send_request("/image", method="GET", data={"slot": slot})
 
+    def display_image(self, image_data):
+        """
+        Send image data to the Raspberry Pi for display.
+        :param image_data: Dictionary containing image data.
+        :return: Response JSON or error message.
+        """
+        return self.send_request("/display_image", method="POST", data=image_data)
+
+
+def load_image_data_from_json(file_path):
+    """
+    Load image data from a JSON file.
+    :param file_path: Path to the JSON file containing image data.
+    :return: Parsed JSON data or an error message.
+    """
+    try:
+        with open(file_path, "r") as file:
+            raw_data = file.read()
+            raw_data = raw_data.lstrip("\ufeff")
+            print("Raw file content:", raw_data  )
+            data = json.loads(raw_data.encode('utf-8').decode('utf-8'))
+            print(f"Loaded image data from {file_path}.")
+            return data
+    except Exception as e:
+        print(f"Failed to load image data from {file_path}: {e}")
+        return None
+
 
 if __name__ == "__main__":
     raspberry_pi_ip = "192.168.100.156"
     raspberry_pi_port = 14440
     slot = '2'
+    json_file_path = "test_image_data.json"
     client = RaspberryPiClient(raspberry_pi_ip, raspberry_pi_port)
     # print("Checking memory status...")
     # print(client.check_memory())
@@ -106,5 +134,10 @@ if __name__ == "__main__":
     # print(client.shutdown_raspiframe())
     # print("Fetching busy slots...")
     # print(client.get_busy_slots())
-    print(f"Fetching image from slot {slot}...")
-    print(client.get_image(slot))
+    # print(f"Fetching image from slot {slot}...")
+    # print(client.get_image(slot))
+    image_data = load_image_data_from_json(json_file_path)
+    if image_data:
+        print("Sending image data to the Raspberry Pi for display...")
+        response = client.display_image(image_data)
+        print("Response from Raspberry Pi:", response)
