@@ -10,7 +10,6 @@ import psutil
 import zlib
 import json
 import sys
-
 sys.path.append("/home/limonek/repos/rpi-rgb-led-matrix/bindings/python")
 from rgbmatrix import RGBMatrix, RGBMatrixOptions
 from PIL import Image
@@ -20,7 +19,9 @@ app = Flask(__name__)
 SLOTS_FILE = "slots_data.json"
 slots = {}
 matrix = None
-
+current_image = None
+image_lock = threading.Lock()
+interrupt_event = threading.Event()
 
 def initialize_matrix():
     global matrix
@@ -85,7 +86,6 @@ def system_action():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-
 def initialize_slots(file_path="slots_data.json", number_of_slots=6):
     """
     Initialize the slots.json file with None values for all slots if it's empty or invalid.
@@ -95,7 +95,7 @@ def initialize_slots(file_path="slots_data.json", number_of_slots=6):
             data = json.load(f)
             if "slots" in data and isinstance(data["slots"], dict):
                 print("Slots file is already initialized.")
-                return
+                return  
     except (FileNotFoundError, json.JSONDecodeError):
         print("Slots file not found or invalid. Initializing with default slots.")
 
@@ -118,7 +118,7 @@ def load_slots():
     except (FileNotFoundError, json.JSONDecodeError):
         print("Slots file not found or invalid")
         return slots
-
+    
 
 def save_slot(slot_number, slot_data, file_path="slots_data.json"):
     """
@@ -160,33 +160,96 @@ def get_slots():
     print(f"slots: {slots}")
     print(f"len(slots):{len(slots)}")
 
-    busy_slots = [key for key, value in slots.items() if value is not None]
+    busy_slots = [key for key,value in slots.items() if value is not None]
     print(f"busy_slots: {busy_slots}")
     return jsonify({"slots": slots}), 200
 
+@app.route("/slots/clear", methods=["POST"])
+def clear_slot():
+    """
+    Endpoint to clear a specific slot, setting its value to None.
+    """
+    try:
+        data = request.get_json()
+        if not data or "slot" not in data:
+            return jsonify({"status": "error", "message": "Missing 'slot' parameter"}), 400
+
+        slot = str(data["slot"])
+        slots = load_slots()
+
+        if slot not in slots:
+            return jsonify({"status": "error", "message": f"Slot {slot} does not exist"}), 400
+
+        save_slot(slot, None)
+        return jsonify({"status": "success", "message": f"Slot {slot} cleared"}), 200
+
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
 
 def slot_display_loop():
+    global current_image
+    current_slot_index = 0
+    slots_keys = []
+    def responsive_sleep(duration):
+        """Sleep in small increments to allow interrupt checks."""
+        elapsed = 0
+        increment = 0.1  
+        while elapsed < duration:
+            if interrupt_event.is_set():
+                print("Interrupt detected during responsive_sleep.")
+                return 
+            time.sleep(increment)
+            elapsed += increment
+
     while True:
+        if interrupt_event.is_set():
+            print("Entered interrupt event in slot display loop")
+            print(f"current_image before entering image_lock: {current_image}")
+            with image_lock:
+                print("Entered image_lock")
+                if current_image:
+                    print(f"Displaying current image for 5 seconds:")
+                    display_image(current_image['pixels'])
+                    time.sleep(5)
+                    matrix.Clear()
+                    current_image = None
+                    interrupt_event.clear()
+                    print("Resuming normal slot cycle")
+                    continue
+            
         slots = load_slots()
         if not slots:
             print("No slots found. Waiting...")
-            time.sleep(5)
+            responsive_sleep(5)
             continue
-
-        for slot, slot_data in slots.items():
-            if slot_data:
+        
+        if not slots_keys or set(slots_keys) != set(slots.keys()):
+            slots_keys = list(slots.keys())
+            current_slot_index = 0
+            
+        for _ in range(len(slots_keys)):
+            slot = slots_keys[current_slot_index]
+            slot_data = slots.get(slot)
+            
+            if interrupt_event.is_set():
+                print("Interrupt signal received, breaking out of slot display loop")
+                break
+            
+            if slot_data:  
                 duration = slot_data.get("duration", 10)
                 pixels = slot_data.get("pixels", [])
                 if pixels:
                     print(f"Displaying image from slot {slot} for {duration} seconds.")
                     display_image(pixels)
-                    time.sleep(duration)
+                    responsive_sleep(duration)  
                     matrix.Clear()
                 else:
                     print(f"Slot {slot} has no valid pixel data.")
             else:
                 print(f"Slot {slot} is empty.")
-        time.sleep(1)
+            current_slot_index = (current_slot_index + 1) % len(slots_keys)
+        responsive_sleep(1)
 
 
 def calculate_crc(image):
@@ -203,8 +266,8 @@ def calculate_crc(image):
     byte_data = bytearray()
     for value in image:
         byte_data.extend(value.to_bytes(4, byteorder='big', signed=True))
-
-    crc32_value = zlib.crc32(byte_data) & 0xFFFFFFFF
+    
+    crc32_value = zlib.crc32(byte_data) & 0xFFFFFFFF  
     return crc32_value
 
 
@@ -214,6 +277,7 @@ def set_image():
     Endpoint to upload image data to a specific slot.
     Expects JSON payload with keys: slot, duration, pixels.
     """
+    global current_image
     try:
         data = request.get_json()
         print(f"image_data: {data}")
@@ -233,7 +297,7 @@ def set_image():
         duration = data['duration']
         pixels = data['pixels']
         received_crc = data["crc"]
-
+        
         calculated_crc = calculate_crc(pixels)
         if calculated_crc != received_crc:
             return jsonify({"message": "CRC mismatch", "expected_crc": calculated_crc, "status": "error"}), 400
@@ -243,8 +307,13 @@ def set_image():
         slots[slot] = {"duration": duration, "pixels": pixels, "crc": received_crc}
         save_slot(slot, slots[slot])
         print(f"Updated slots after setting image: {slots}")
-
-        return jsonify({"status": "success", "crc": calculated_crc, "slot": slot}), 200
+        
+        with image_lock:
+            current_image = {"pixels": pixels, "duration": duration, "crc":received_crc}
+            interrupt_event.set()
+            print("Temporary image set for display")
+            print(f"Current_image: {current_image}")
+        return jsonify({"status": "success","crc": calculated_crc, "slot": slot}), 200
 
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 400
@@ -259,7 +328,7 @@ def get_image():
 
     slot = request.args.get("slot", type=str)
     if slot is None:
-        return jsonify({"status": "error", "message": "Missing 'slot' parameter"}), 400
+        return jsonify({"status":"error", "message":"Missing 'slot' parameter"}), 400
     print(f"Slot in get_image: {slot}")
     slot_data = slots.get(slot)
     print(f"Slots in get_image: {slots}")
@@ -267,8 +336,8 @@ def get_image():
 
     print(f"Requested slot_data in get_image: {slot_data}")
     if slot_data is None:
-        return jsonify({"status": "error", "message": f"Slot {slot} is empty or does not exist"}), 400
-
+        return jsonify({"status":"error", "message":f"Slot {slot} is empty or does not exist"}), 400
+    
     response_data = {
         "slot": slot,
         "duration": slot_data["duration"],
@@ -278,12 +347,11 @@ def get_image():
     print(f"response_data: {response_data}")
     return jsonify(response_data), 200
 
-
 @app.route("/image/reset", methods=["POST"])
 def reset_slots():
     """Endpoint to reset all slots."""
     global slots
-    slots = {i: None for i in range(6)}
+    slots = {i: None for i in range(6)}  
     save_slots()
     return jsonify({"message": "All slots reset", "status": "success"}), 200
 
@@ -320,7 +388,6 @@ def display_image_from_request():
         return jsonify({"message": f"Invalid image data: {str(ve)}"}), 400
     except Exception as e:
         return jsonify({"message": f"Failed to display image: {str(e)}"}), 500
-
 
 def display_image(pixels):
     if not matrix:
@@ -360,7 +427,6 @@ def display_on_matrix(image_data):
 
     matrix.Clear()
 
-
 @app.route("/ping", methods=["GET", "POST"])
 def ping():
     return jsonify({"status": "success", "message": "Received ping"}), 200
@@ -382,6 +448,7 @@ def start_udp_listener():
         if message.startswith("RaspiFrame:"):
             response = f"RaspiFrame:{get_ip_address()}"
             udp_socket.sendto(response.encode(), addr)
+            return
 
 
 def get_ip_address():
@@ -399,7 +466,7 @@ def get_ip_address():
 if __name__ == "__main__":
     initialize_matrix()
     initialize_slots()
-    # start_udp_listener()
+    start_udp_listener()
     listener_thread = threading.Thread(target=slot_display_loop, daemon=True)
     listener_thread.start()
     app.run(host="0.0.0.0", port=14440)
