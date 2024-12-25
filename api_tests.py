@@ -1,6 +1,7 @@
 import requests
 import json
 
+
 class RaspberryPiClient:
     def __init__(self, ip, port):
         """
@@ -81,6 +82,12 @@ class RaspberryPiClient:
         """
         return self.send_request("/slots", method="GET")
 
+    def clear_slot(self, slot_number):
+        """
+        Test clearing a specific slot using the /slots/clear endpoint.
+        """
+        return self.send_request("/slots/clear", method="POST", data={"slot": slot_number})
+
     def get_image(self, slot):
         """
         Retrieve image data from a specific slot on the Raspberry Pi.
@@ -108,7 +115,7 @@ def load_image_data_from_json(file_path):
         with open(file_path, "r") as file:
             raw_data = file.read()
             raw_data = raw_data.lstrip("\ufeff")
-            print("Raw file content:", raw_data  )
+            print("Raw file content:", raw_data)
             data = json.loads(raw_data.encode('utf-8').decode('utf-8'))
             print(f"Loaded image data from {file_path}.")
             return data
@@ -120,7 +127,7 @@ def load_image_data_from_json(file_path):
 if __name__ == "__main__":
     raspberry_pi_ip = "192.168.100.156"
     raspberry_pi_port = 14440
-    slot = '2'
+    slot = '1'
     json_file_path = "test_image_data.json"
     client = RaspberryPiClient(raspberry_pi_ip, raspberry_pi_port)
     # print("Checking memory status...")
@@ -136,8 +143,10 @@ if __name__ == "__main__":
     # print(client.get_busy_slots())
     # print(f"Fetching image from slot {slot}...")
     # print(client.get_image(slot))
-    image_data = load_image_data_from_json(json_file_path)
-    if image_data:
-        print("Sending image data to the Raspberry Pi for display...")
-        response = client.display_image(image_data)
-        print("Response from Raspberry Pi:", response)
+    # image_data = load_image_data_from_json(json_file_path)
+    # if image_data:
+    #     print("Sending image data to the Raspberry Pi for display...")
+    #     response = client.display_image(image_data)
+    #     print("Response from Raspberry Pi:", response)
+    print("Clearing slot...")
+    print(client.clear_slot(slot))
